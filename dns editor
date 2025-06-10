@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# 检查是否为root用户
+if [ "$(id -u)" != "0" ]; then
+   echo "此脚本必须以root权限运行" 
+   exit 1
+fi
+
+# 获取当前网络接口
+INTERFACE=$(ip route | awk '/default/ {print $5}' | head -n1)
+
+# 用户输入DNS
+read -p "请输入首选DNS地址: " DNS1
+read -p "请输入备用DNS地址: " DNS2
+
+# 验证DNS格式
+validate_dns() {
+    local dns=$1
+    if [[ ! $dns =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "错误：$dns 不是有效的IPv4地址"
+        exit 1
+    fi
+}
+
+validate_dns "$DNS1"
+validate_dns "$DNS2"
+
+# 立即生效配置
+echo "正在应用新DNS配置..."
+cat << EOF > /etc/resolv.conf
+nameserver $DNS1
+nameserver $DNS2
+EOF
+
+# 永久化配置
+echo "正在永久保存配置..."
+cat << EOF > /etc/network/interfaces.d/dns-config
+auto $INTERFACE
+iface $INTERFACE inet dhcp
+    dns-nameservers $DNS1 $DNS2
+EOF
+
+# 更新NetworkManager配置（如果安装）
+if command -v nmcli &> /dev/null; then
+    nmcli con mod "$(nmcli -t -f NAME con show --active | head -n1)" ipv4.dns "$DNS1 $DNS2"
+    nmcli con down "$(nmcli -t -f NAME con show --active | head -n1)" 
+    nmcli con up "$(nmcli -t -f NAME con show --active | head -n1)" 
+fi
+
+# 重启网络服务（如果使用systemd-networkd）
+if systemctl is-active --quiet systemd-networkd; then
+    mkdir -p /etc/systemd/network
+    cat << EOF > /etc/systemd/network/90-dns.network
+[Network]
+DNS=$DNS1 $DNS2
+EOF
+    systemctl restart systemd-networkd
+fi
+
+echo "DNS配置已成功更新并永久保存！"
+echo "当前DNS设置："
+grep nameserver /etc/resolv.conf
